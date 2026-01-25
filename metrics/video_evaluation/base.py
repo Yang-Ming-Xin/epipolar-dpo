@@ -1,6 +1,8 @@
 import os
 from typing import Tuple, Dict, Any
 from abc import ABC, abstractmethod
+import re
+import glob
 
 import cv2
 from tqdm import tqdm
@@ -27,27 +29,69 @@ class BaseEvaluator(ABC):
 
     def evaluate_video(self, video_path):
         """
-        Evaluate a video file by processing frames and computing metrics.
+        Evaluate a video file or image sequence by processing frames and computing metrics.
 
         Args:
-            video_path: Path to the MP4 video file
+            video_path: Path to MP4 video file or directory containing image sequence
 
         Returns:
             Dictionary with evaluation metrics
         """
         if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
+            raise FileNotFoundError(f"Path not found: {video_path}")
 
-        # Open the video
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {video_path}")
+        # Helper for natural sorting
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower()
+                    for text in re.split('([0-9]+)', s)]
 
-        # Get video info
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # Check if input is directory (image sequence) or file (video)
+        if os.path.isdir(video_path):
+            # Load image sequence
+            image_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tiff']
+            image_files = []
+            for ext in image_extensions:
+                image_files.extend(glob.glob(os.path.join(video_path, ext)))
+            
+            image_files = sorted(image_files, key=natural_sort_key)
+            
+            if not image_files:
+                raise ValueError(f"No images found in directory: {video_path}")
+            
+            # Read first image to get dimensions
+            first_frame = cv2.imread(image_files[0])
+            if first_frame is None:
+                raise ValueError(f"Could not read first image: {image_files[0]}")
+            
+            frame_count = len(image_files)
+            fps = 10.0  # Default FPS for image sequences
+            height, width = first_frame.shape[:2]
+            
+            frames_iterator = ((i, cv2.imread(img_path)) for i, img_path in enumerate(image_files))
+            is_video = False
+        else:
+            # Open video file
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise ValueError(f"Could not open video: {video_path}")
+
+            # Get video info
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            def video_frame_generator():
+                idx = 0
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    yield idx, frame
+                    idx += 1
+            
+            frames_iterator = video_frame_generator()
+            is_video = True
 
         print(f"Video: {os.path.basename(video_path)}")
         print(f"Dimensions: {width}x{height}, {frame_count} frames, {fps} fps")
@@ -57,13 +101,12 @@ class BaseEvaluator(ABC):
         frame_metrics = []
 
         # Process frames
-        frame_idx = 0
         pbar = tqdm(total=frame_count)
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+        for frame_idx, frame in frames_iterator:
+            if frame is None:
+                pbar.update(1)
+                continue
 
             # Only process frames according to sampling rate
             if frame_idx % self.sampling_rate == 0:
@@ -76,11 +119,11 @@ class BaseEvaluator(ABC):
                     print(f"Error processing frame {frame_idx}: {e}")
                     continue
 
-            frame_idx += 1
             pbar.update(1)
 
         # Release resources
-        cap.release()
+        if is_video:
+            cap.release()
         pbar.close()
 
         main_metric, all_metrics = self.aggregate_metrics(frame_metrics)
