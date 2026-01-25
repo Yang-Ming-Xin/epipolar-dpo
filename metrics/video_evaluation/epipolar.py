@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from kornia.geometry.epipolar import find_fundamental, sampson_epipolar_distance
 from transformers import AutoImageProcessor, AutoModel
 from PIL import Image
+import re
+import glob
 
 from metrics.video_evaluation.base import BaseEvaluator
 
@@ -317,27 +319,58 @@ class EpipolarEvaluator(BaseEvaluator):
         """
         self.frames = []
 
-        # Read video
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Helper for natural sorting
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower()
+                    for text in re.split('([0-9]+)', s)]
 
-        if not cap.isOpened():
-            return -1, {'error': f'Could not open video: {video_path}'}
+        # Check if video_path is a directory (image sequence) or a file (video)
+        if os.path.isdir(video_path):
+            image_extensions = ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.tiff']
+            image_files = []
+            for ext in image_extensions:
+                image_files.extend(glob.glob(os.path.join(video_path, ext)))
+            
+            # Sort naturally
+            image_files = sorted(image_files, key=natural_sort_key)
+            
+            if not image_files:
+                return -1, {'error': f'No images found in directory: {video_path}'}
+                
+            total_frames = len(image_files)
+            fps = 10.0  # Default FPS for image sequences if unknown
+            
+            # Load frames
+            for i, img_path in enumerate(image_files):
+                if i % self.sampling_rate == 0:
+                    frame = cv2.imread(img_path)
+                    if frame is not None:
+                        self.frames.append(frame)
+                    else:
+                        print(f"Warning: Could not read image {img_path}")
 
-        # Extract frames at the specified sampling rate
-        frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        else:
+            # Read video file
+            cap = cv2.VideoCapture(video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-            if frame_idx % self.sampling_rate == 0:
-                self.frames.append(frame.copy())
+            if not cap.isOpened():
+                return -1, {'error': f'Could not open video: {video_path}'}
 
-            frame_idx += 1
+            # Extract frames at the specified sampling rate
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-        cap.release()
+                if frame_idx % self.sampling_rate == 0:
+                    self.frames.append(frame.copy())
+
+                frame_idx += 1
+
+            cap.release()
 
         # Create frame pairs (consecutive sampled frames)
         frame_pairs = []
